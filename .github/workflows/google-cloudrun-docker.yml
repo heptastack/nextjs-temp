@@ -1,4 +1,4 @@
-name: Build || Push || Deploy Cloud 
+name: Build || Push || Deploy Cloud
 
 on:
   push:
@@ -6,12 +6,10 @@ on:
     #   - main
     tags:
       - v*
-env:
-  PROJECT_ID: heptastack
-  REGION: us-central1
-  SERVICE: next-temp
-  REPOSITORY: heptastack-repo
-  GAR_HOST: us-central1-docker.pkg.dev
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   build-and-push:
@@ -19,59 +17,71 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout repository before docker tag
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set Docker image tag
-        id: set_tag
-        run: echo "::set-output name=tag::${GITHUB_REF#refs/tags/}"
+      # Step 1.1: Set up Docker image
+      - name: Set up Docker image tag
+        id: vars
+        run: |
+          TAG=${{ github.sha }}
+          echo "TAG=$TAG" >> $GITHUB_ENV
 
-      - id: 'auth'
-        uses: 'google-github-actions/auth@v2'
+      # Step 2: Authenticate to Google Cloud using workload_identity_provider
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
         with:
-          credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCLOUD_SERVICE_ACCOUNT }}
 
-      - name: 'Set up Cloud SDK'
-        uses: 'google-github-actions/setup-gcloud@v2'
-
-      - name: 'Use gcloud CLI'
+      # Step 3: Set up Cloud SDK
+      - name: "Set up Cloud SDK"
+        uses: "google-github-actions/setup-gcloud@v2"
+        with:
+          version: "latest"
+      - name: "Use gcloud CLI"
         run: 'gcloud auth list --filter=status:ACTIVE --format="value(account)"'
 
-      
-      - name: Login to GAR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{env.REGION}}-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-          #export_default_credentials: true
+      # Step 4: Use gcloud CLI (optional step for general configuration, etc.)
+      - name: Configure gcloud
+        run: |
+          gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+          gcloud config set run/region ${{ secrets.GCP_REGION }}
 
-      # Build the Docker image
+      # Step 5: Login to Google Artifact Registry (GAR)
+      - name: Authenticate Docker with Google Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ secrets.GCP_ARTIFACT_REGISTRY_HOST }}
+
+      # Step 6: Build Docker image
+      #docker tag SOURCE-IMAGE LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY/IMAGE:TAG
       - name: Build Docker image
         run: |
-          docker build -t ${{ env.GAR_HOST }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE }}:latest .
+          docker build -t ${{ secrets.GCP_ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY_NAME }}/${{ secrets.PROJECT_NAME }}:latest .
 
-      # Push the Docker image to Google Artifact Registry
-      - name: Push Docker image to Google Artifact Registry
+      # Step 7: Push Docker image to Google Artifact Registry
+      - name: Push Docker image
         run: |
-          docker push ${{ env.GAR_HOST }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE }}:latest
+          docker push ${{ secrets.GCP_ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY_NAME}}/${{ secrets.PROJECT_NAME }}:latest
 
-      - name: 'Deploy to Cloud Run'
+      # Step 8: Deploy to Cloud Run
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ secrets.PROJECT_NAME }} \
+            --image ${{ secrets.GCP_ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY_NAME }}/${{ secrets.PROJECT_NAME }}:latest \
+            --platform managed \
+            --region ${{ secrets.GCP_REGION }} \
+            --project ${{ secrets.GCP_PROJECT_ID }} \
+            --service-account ${{ secrets.GCLOUD_SERVICE_ACCOUNT }} \
+            --allow-unauthenticated
 
-        # END - Docker auth and build
+      # Step 9: Allow authenticated access (replace unauthenticated access with authenticated users)
+      - name: Allow authenticated access
+        run: |
+          gcloud run services add-iam-policy-binding ${{ secrets.PROJECT_NAME }}  \
+            --region ${{ secrets.GCP_REGION }} \
+            --member="allAuthenticatedUsers" \
+            --role="roles/run.invoker" \
+            --platform managed
 
-        uses: 'google-github-actions/deploy-cloudrun@33553064113a37d688aa6937bacbdc481580be17' # google-github-actions/deploy-cloudrun@v2
-        with:
-          service: '${{ env.SERVICE }}'
-          region: '${{ env.REGION }}'
-          # NOTE: If using a pre-built image, update the image name below:
-
-          image: '${{ env.GAR_HOST }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE }}:latest'
-      # If required, use the Cloud Run URL output in later steps
-      - name: 'gcloud CLI Allowing unauthenticated'
-        run: 'gcloud run services add-iam-policy-binding ${{ env.SERVICE }} --member="allUsers" --role="roles/run.invoker" --region=${{env.REGION}}'      
-      
-      - name: 'Show output'
-        run: |2-
-
-          echo ${{ steps.deploy.outputs.url }}
